@@ -1,0 +1,163 @@
+#! /usr/bin/python
+
+import sys
+import os
+import re
+import benz_cpo_monitor
+import httplib
+from bs4 import BeautifulSoup
+import json
+import datetime
+
+# code directory where the parent folder is located.
+working_directory = "/Users/chhuang/Dropbox/Car/"
+
+# Search for CPO VOLVO S60 at http://volvocarspreowned.autotrader.com/dealerdirect/results.jsp?dd_brand=VOLVO&sort_type=distance&address=20770&distance=50&bodyStyle=&transmission=&make=VOLVO&model=S60&start_year=2011&end_year=2014&max_price=&max_mileage=&color=&engine=&drive=&certified=y
+def fetch_data(zipcode,distance,class_number, year_from, year_to):
+	url = "volvocarspreowned.autotrader.com"
+	#query = '/mbucl?search={%22country2%22:%22US%22,%22hits%22:{%22to%22:999},%22cpo%22:1,%22postcode%22:%22'	+str(zipcode)	+'%22,%22distance%22:{%22to%22:%22'	+str(distance)	+'%22},%22year%22:{%22to%22:9998},%22order%22:[%22pricea%22],%22class_bodystyle%22:[{%22class%22:3,%22bodystyle%22:[1],%22model%22:[],%22variant%22:[]}]}'
+	query = '/dealerdirect/results.jsp?dd_brand=VOLVO&sort_type=price&address='+str(zipcode)+ '&distance='+str(distance)+'&bodyStyle=&transmission=&make=VOLVO&model='+str(class_number)+'&start_year='+str(year_from)+'&end_year='+str(year_to)+'&max_price=&max_mileage=&color=&engine=&drive=&certified=y'
+	conn = httplib.HTTPConnection(url)
+	conn.request("GET",query)
+	rl = conn.getresponse()
+	if rl.status != 200 or rl.reason != "OK":
+		send_email("volvo car dealer web error",rl.status+": "+rl.reason)
+		sys.exit(0)
+	data = rl.read()
+
+	return data
+
+# Update current database
+def update(vehicles_data, zipcode,distance,class_number):
+	on_market_file_name = working_directory + str(zipcode)+"_"+str(distance)+"_"+str(class_number)+"_current.json"
+	sold_file_name = working_directory + str(zipcode) + "_" + str(distance) +"_"+str(class_number)+"_sold.json"
+	vin_current_cars = {}
+	data = ""
+	vins_set = set()
+	if os.path.isfile(on_market_file_name) == True:
+		fin = open(on_market_file_name, "r")
+		data = fin.read()
+		fin.close()
+		current_cars = json.loads(data)
+		for car in current_cars:
+			vin_current_cars[car['vin']] = car
+			vins_set.add(car['vin'])
+	new_vehicle_count = 0
+	email_subject = " near " + str(zipcode)
+	email_content = """
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Volvo Class</title>
+	<style type="text/css">
+		body {
+			font-family:"Segoe UI", "Liberation Sans", "Nimbus Sans L", Helvetica, Arial, serif;
+			font-size:14px;
+		}
+
+		dl {
+		    margin-bottom:0px;
+		}
+	 
+		dl dt {
+		    color:#000;
+		    font-weight: bold;
+		    float:left; 
+		    margin-right:0px; 
+		    padding:0px;  
+		    width: 75px;
+		}
+		 
+		dl dd {
+		    margin:0px; 
+		    padding:0px;
+		}
+		ol,ul {
+			margin:0px;
+			margin-bottom: 0px;
+		}
+	</style>
+</head>
+
+<body>
+"""
+	changed_vehicle_count = 0
+	email_content_changed_vehicle = """
+<h3>Vehicle Information Changed:</h3>
+	"""
+
+	#Parse current data
+	soup = BeautifulSoup(vehicles_data)
+	cars =  soup.find_all(attrs={"class":"clear listing"})
+	# new cars
+	updated_cars = []
+	for car in cars:
+		#try:
+		if True:
+			next_url = car.find('div',attrs={"class":"button-center"}).find('a')['href']
+			vin = re.search('car_id=(.*?)&',next_url)
+			vin = vin.group(1)
+			car_content = car.prettify()
+			car_json = {}
+			car_json['vin'] = vin
+			car_json['price'] = car.find('div',attrs={"class":"price"}).string
+			car_json['url'] = "volvocarspreowned.autotrader.com" + next_url
+
+			if vin in vin_current_cars.keys():
+				is_changed = False
+				vins_set.remove(vin)
+				for key in car_json.keys():
+					if vin_current_cars[vin][key] != car_json[key]:
+						is_changed = True
+						#print vin_current_cars[vin][key]+"\n"+car_json[key]
+					vin_current_cars[vin][key] = car_json[key]
+				car_json["record_date"] = vin_current_cars[vin]["record_date"]
+				if is_changed == True:
+					changed_vehicle_count += 1
+					email_content_changed_vehicle += "<a href='"+car_json['url']+"'>Link</a>"
+					email_content_changed_vehicle += car_content
+			# If not in, new car, set email and archive it
+			else:	
+				new_vehicle_count += 1
+				car_json["record_date"] = str(datetime.datetime.now()) 
+				email_content += "<a href='"+car_json['url']+"'>Link</a>"
+				email_content += car_content
+
+			updated_cars.append(car_json)
+		#except Exception as e:
+		#	benz_cpo_monitor.send_email("Volvo CPO Monitor Error ", str(e)+'\n'+car.prettify())
+
+	if changed_vehicle_count > 0:
+		email_content += email_content_changed_vehicle
+
+	email_content += """
+	</body>
+	</html>
+	"""
+	# Send an email to me for new E-Class:
+	if new_vehicle_count > 0 or changed_vehicle_count > 0:
+		if changed_vehicle_count > 0:
+			email_subject = str(changed_vehicle_count) + " "+ class_number +" info changed"  + email_subject
+		if new_vehicle_count > 0:
+			email_subject = str(new_vehicle_count) + " new "+ class_number + " " + email_subject
+		benz_cpo_monitor.send_email(email_subject,email_content)
+
+	# Update current car JSON file
+	fout = open(working_directory+str(zipcode)+"_"+str(distance)+"_"+str(class_number)+'_current.json','w')
+	fout.write(json.dumps(updated_cars))
+	fout.close()
+
+	if len(vins_set) > 0:
+		sold_cars = {}
+		for vin in list(vins_set):
+			vin_current_cars[vin]["sold_date"] = str(datetime.datetime.now())  
+			sold_cars[vin] = vin_current_cars[vin]
+
+		# Write to the archived JSON file
+		fout = open(working_directory+str(zipcode)+"_"+str(distance)+"_"+str(class_number)+'_sold.json','a')
+		fout.write(json.dumps(sold_cars.values()))
+		fout.close()
+	
+#data = fetch_data(20770,50,'S60',2011,2014)
+#update(data, 20770, 50, 'S60')
+
